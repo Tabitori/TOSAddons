@@ -1,6 +1,6 @@
 local addonName = 'DpsCount_Ex';
-local verText = '1.2.0';
-local verSettings = 2;
+local verText = '1.3.7';
+local verSettings = 3;
 local authorName = 'Tabitori';
 local addonNameLower = string.lower(addonName);
 local settingFileName = 'setting.json';
@@ -17,28 +17,24 @@ DpsCount.frame = nil;
 DpsCount.control = {total = nil, enemy = nil, loop = nil};
 DpsCount.Loaded = false;
 DpsCount.IsCount = true;
+DpsCount.IsCapture = false;
 DpsCount.Battle = {tick = 0};
 DpsCount.SettingFilePathName = string.format('../addons/%s/%s', addonNameLower, settingFileName);
 DpsCount.SaveFilePathName = '../release/screenshot';
-DpsCount.LoopSize = {
-	min = 150,
-	def = 900,
-	max = 3000
-};
 DpsCount.Settings = {
 	version = verSettings,
 	show = 1,
+	autorun = 0,
 	size = 'Normal', -- Normal / TODO Min
 	xPos = 300,
 	yPos = 400,
-	loop = {
-		size = DpsCount.LoopSize.def,
-		proc = math.ceil(DpsCount.LoopSize.def / 30)
-	}
+	proc = 30
 };
 
 function DpsCount.Log(Message)
-	if Message == nil then return end
+	if Message == nil then
+		return;
+	end
 	CHAT_SYSTEM(string.format('{#333366}{ol}[%s] ', addonName) .. Message);
 end
 
@@ -59,20 +55,19 @@ end
 
 function DpsCount.Reset()
 	DpsCount.IsCount = true;
+	session.dps.Clear_allDpsInfo();
 	DpsCount.Battle = {
+		i = 1,
 		sec = 0,
-		time = 0,
 		tick = 0,
 		map = DpsCount.GetMapName(),
 		name = GETMYPCNAME(),
 		ts = {
-			clock = 0,
-			start = 0,
-			last = ''
+			time = 0,
+			last = 0,
+			start = 0
 		},
 		loop = {
-			list = {},
-			cur = 0,
 			last = 0,
 			lost = 0,
 			count = 0
@@ -89,23 +84,25 @@ function DpsCount.Reset()
 			eDPS = 0,
 			frame = {},
 			enemy = {},
+			skill = {},
 			elast = {'', '', ''}
 		}
 	};
-	for i=1,DpsCount.Settings.loop.size do
-		DpsCount.Battle.loop.list[i] = {0, ''};
-	end
 	DpsCount.Log('Reset session.');
 	DpsCount.IsCount = false;
 end
 
 function DpsCount.GetString(toLog)
 	local rate = DpsCount.Battle.damage.eDPS;
-	if rate < 1 then rate = 1; end
-	rate = math.floor(DpsCount.Battle.damage.aDPS * 100 / rate);
+	if rate < 1 then
+		rate = '?';
+	else
+		rate = math.floor(DpsCount.Battle.damage.aDPS * 100 / rate);
+	end
 
 	if toLog then
 		return string.format('Total tick:            %s\n'
+						  .. 'Total tick lost:       %s\n'
 						  .. 'Total damage:          %s\n'
 						  .. 'Duration (sec):        %s\n'
 						  .. 'DurEffective (sec):    %s\n'
@@ -116,6 +113,7 @@ function DpsCount.GetString(toLog)
 						  .. 'Max damage per tick:   %s\n'
 						  .. 'Max ticks per second:  %s',
 			DpsCount.Battle.tick,
+			DpsCount.Battle.loop.lost,
 			DpsCount.Battle.damage.total,
 			DpsCount.Battle.damage.aSec,
 			DpsCount.Battle.damage.eSec,
@@ -144,22 +142,54 @@ function DpsCount.GetLogFilename()
 	return string.format(addonNameLower .. '_%s_%s.txt', os.date('%Y%m%d'), DpsCount.Battle.name);
 end
 
+function DpsCount.SortLogDPSCmp(rec1, rec2)
+	return (rec1.node.total > rec2.node.total);
+end
+
+function DpsCount.SortLogDPS(list)
+	local index = {};
+	for name,node in pairs(list) do
+		table.insert(index, {name = name, node = node});
+	end
+
+	table.sort(index, DpsCount.SortLogDPSCmp);
+	return index;
+end
+
 function DpsCount.SaveLogDPS()
 	if DpsCount.Battle.tick < 1 then
 		return;
 	end
 
 	local tStart = os.date('%Y-%m-%d %H:%M:%S', DpsCount.Battle.ts.start);
-	local tLast = os.date('%Y-%m-%d %H:%M:%S', DpsCount.Battle.ts.start + (DpsCount.Battle.ts.last - DpsCount.Battle.ts.clock));
+	local tLast = os.date('%Y-%m-%d %H:%M:%S', DpsCount.Battle.ts.start + (DpsCount.Battle.ts.last - DpsCount.Battle.ts.time));
 
 	local file = io.open(DpsCount.SaveFilePathName .. '/' .. DpsCount:GetLogFilename(), 'a');
 	file:write('[' .. tStart .. ', ' .. tLast .. '] ' .. DpsCount.Battle.map .. '\n');
 	file:write(DpsCount.GetString(true) .. '\n');
 
-	for name,node in pairs(DpsCount.Battle.damage.enemy) do
-		file:write(name .. ': Total: ' .. node.total .. ' Max: ' .. node.max .. ' Tick: ' .. node.tick .. '\n');
+	local index = {};
+	local subIndex = {};
+
+	file:write('--\n');
+	file:write(string.format('%-25s: %8s %8s %8s %11s %6s\n', 'Name', 'Min', 'Avg', 'Max', 'Total', 'Tick'));
+	file:write('--\n');
+	index = DpsCount.SortLogDPS(DpsCount.Battle.damage.skill);
+	for i,rec in pairs(index) do
+		file:write(string.format('%-25s: %8s %8d %8d %11d %6d\n', string.sub(rec.name, 1, 25), rec.node.min, math.floor(rec.node.total / rec.node.tick), rec.node.max, rec.node.total, rec.node.tick));
 	end
 
+	file:write('--\n');
+	index = DpsCount.SortLogDPS(DpsCount.Battle.damage.enemy);
+	for i,rec in pairs(index) do
+		file:write(string.format('%-24s-:- %7s %8d %8d %11d %6d -\n', string.sub(rec.name, 1, 24), rec.node.min, math.floor(rec.node.total / rec.node.tick), rec.node.max, rec.node.total, rec.node.tick));
+		subIndex = DpsCount.SortLogDPS(rec.node.skill);
+		for j,sub in pairs(subIndex) do
+			file:write(string.format('  %-23s: %8d %8d %8d %11d %6d\n', string.sub(sub.name, 1, 23), sub.node.min, math.floor(sub.node.total / sub.node.tick), sub.node.max, sub.node.total, sub.node.tick));
+		end
+	end
+
+	file:write('--------------------------------------------------------------------------\n');
 	file:write('\n');
 	file:close();
 end
@@ -180,34 +210,47 @@ function DpsCount.LoadSetting()
 	end
 
 	local save = false;
-	if DpsCount.Settings.loop == nil then
-		DpsCount.Settings.loop = {
-			size = DpsCount.LoopSize.def,
-			proc = math.ceil(DpsCount.LoopSize.def / 30)
-		};
+
+	if (DpsCount.Settings.show == nil) or (type(DpsCount.Settings.show) ~= 'number') then
+		DpsCount.Settings.show = 1;
 		save = true;
 	end
 
-	if DpsCount.Settings.loop.size < DpsCount.LoopSize.min then
-		DpsCount.Settings.loop.size = DpsCount.LoopSize.min;
+	if (DpsCount.Settings.show ~= 1) and (DpsCount.Settings.show ~= 0) then
+		DpsCount.Settings.show = 1;
 		save = true;
 	end
 
-	if DpsCount.Settings.loop.size > DpsCount.LoopSize.max then
-		DpsCount.Settings.loop.size = DpsCount.LoopSize.max;
+	if (DpsCount.Settings.autorun ~= 1) and (DpsCount.Settings.autorun ~= 0) then
+		DpsCount.Settings.autorun = 0;
 		save = true;
 	end
 
-	local val = math.ceil(DpsCount.Settings.loop.size / 10);
-	if DpsCount.Settings.loop.proc > val then
-		DpsCount.Settings.loop.proc = val;
+	if (DpsCount.Settings.proc == nil) or (type(DpsCount.Settings.proc) ~= 'number') then
+		DpsCount.Settings.proc = 30;
 		save = true;
 	end
 
-	local val = math.ceil(DpsCount.Settings.loop.size / 30);
-	if DpsCount.Settings.loop.proc < val then
-		DpsCount.Settings.loop.proc = val;
+	if (DpsCount.Settings.proc < 10) or (DpsCount.Settings.proc > 1000) then
+		DpsCount.Settings.proc = 30;
+	end
+
+	if (DpsCount.Settings.xPos == nil) or (type(DpsCount.Settings.xPos) ~= 'number') then
+		DpsCount.Settings.xPos = 300;
 		save = true;
+	end
+
+	if DpsCount.Settings.xPos < 1 then
+		DpsCount.Settings.xPos = 300;
+	end
+
+	if (DpsCount.Settings.xPos == nil) or (type(DpsCount.Settings.xPos) ~= 'number') then
+		DpsCount.Settings.xPos = 300;
+		save = true;
+	end
+
+	if DpsCount.Settings.yPos < 1 then
+		DpsCount.Settings.yPos = 400;
 	end
 
 	if save then
@@ -222,89 +265,280 @@ function DpsCount.Numberformat(amount)
 	while true do
 		formatted, k = string.gsub(formatted, '^(-?%d+)(%d%d%d)', '%1,%2');
 		if k == 0 then
-			break
+			break;
 		end
 	end
 	return formatted;
 end
 
-function DpsCount.LoopCurIncrement()
-	DpsCount.Battle.loop.cur = DpsCount.Battle.loop.cur + 1;
-	if DpsCount.Battle.loop.cur == DpsCount.Battle.loop.last then -- loss of value due to buffer overflow
-		DpsCount.Battle.loop.last = DpsCount.Battle.loop.last + 1;
-		DpsCount.Battle.loop.lost = DpsCount.Battle.loop.lost + 1;
-		if DpsCount.Battle.loop.last > DpsCount.Settings.loop.size then
-			DpsCount.Battle.loop.last = 1;
-		end
+-- for test suite
+function DPSCOUNT_EX_GET()
+	return DpsCount;
+end
+
+function DPSCOUNT_EX_ON_INIT(addon, frame)
+	DpsCount.frame = frame;
+
+	acutil.setupEvent(addon, 'GAME_START_3SEC', 'DPSCOUNT_EX_ON_GAME_START_3SEC');
+	acutil.setupEvent(addon, 'FPS_UPDATE', 'DPSCOUNT_EX_UPDATE');
+end
+
+function DPSCOUNT_EX_END_DRAG(addon, frame)
+	DpsCount.Settings.xPos = DpsCount.frame:GetX();
+	DpsCount.Settings.yPos = DpsCount.frame:GetY();
+	acutil.saveJSON(DpsCount.SettingFilePathName, DpsCount.Settings);
+	DpsCount.Log('Settings updated!');
+end
+
+function DPSCOUNT_EX_ON_GAME_START_3SEC()
+	if not DpsCount.Loaded then
+		DpsCount.LoadSetting();
+		DpsCount.IsCapture = (DpsCount.Settings.autorun == 1);
+		DpsCount.Loaded = true;
 	end
-	if DpsCount.Battle.loop.cur > DpsCount.Settings.loop.size then
-		DpsCount.Battle.loop.cur = 1;
-		if DpsCount.Battle.loop.cur == DpsCount.Battle.loop.last then -- loss of value due to buffer overflow
-			DpsCount.Battle.loop.last = DpsCount.Battle.loop.last + 1;
-			DpsCount.Battle.loop.lost = DpsCount.Battle.loop.lost + 1;
-		end
+
+	DpsCount.frame:SetEventScript(ui.LBUTTONUP, 'DPSCOUNT_EX_END_DRAG');
+	DpsCount.frame:ShowWindow(DpsCount.Settings.show);
+	DpsCount.frame:SetPos(DpsCount.Settings.xPos, DpsCount.Settings.yPos);
+
+	DpsCount.control.total = DpsCount.frame:CreateOrGetControl('richtext', 'DPSCOUNT_EX_ON_TOTAL', 5, 5, 280, 20);
+	tolua.cast(DpsCount.control.total, 'ui::CRichText');
+	DpsCount.control.total:SetGravity(ui.LEFT, ui.TOP);
+
+	DpsCount.control.enemy = DpsCount.frame:CreateOrGetControl('richtext', 'DPSCOUNT_EX_ON_ENEMY_NAME', 5, 41, 280, 20);
+	tolua.cast(DpsCount.control.enemy, 'ui::CRichText');
+	DpsCount.control.enemy:SetGravity(ui.LEFT, ui.TOP);
+
+	DpsCount.control.loop = DpsCount.frame:CreateOrGetControl('richtext', 'DPSCOUNT_EX_ON_LOOP_INFO', 329, 74, 60, 23);
+	tolua.cast(DpsCount.control.loop, 'ui::CRichText');
+	DpsCount.control.loop:SetGravity(ui.LEFT, ui.TOP);
+
+	local btn = DpsCount.frame:CreateOrGetControl('button', 'DPSCOUNT_EX_BATTLE_RESET_BUTTON', 382, 72, 23, 23);
+	btn = tolua.cast(btn, 'ui::CButton');
+	btn:SetFontName('white_16_ol');
+	btn:SetText('R');
+	btn:SetEventScript(ui.LBUTTONDOWN, 'DPSCOUNT_EX_BATTLE_PRESS_RESET_BUTTON');
+
+	local chk = DpsCount.frame:CreateOrGetControl('checkbox', 'DPSCOUNT_EX_CAPTURE_FLG', 382, 47, 23, 23);
+	chk = tolua.cast(chk, 'ui::CCheckBox');
+	chk:SetFontName("white_16_ol");
+	chk:SetEventScript(ui.LBUTTONUP, 'DPSCOUNT_EX_TOGGLE_CAPTURE_FLG');
+	if DpsCount.IsCapture then
+		chk:SetCheck(1);
+		session.dps.SendStartDpsMsg();
+	else
+		session.dps.SendStopDpsMsg();
+		chk:SetCheck(0);
+	end
+
+	DPSCOUNT_EX_BATTLE_PRESS_RESET_BUTTON();
+end
+
+function DPSCOUNT_EX_BATTLE_PRESS_RESET_BUTTON(frame, ctrl, argStr, argNum)
+	DpsCount.control.total:SetText('{#FFFFFF}{ol}{s16}DPS Count Ex v' .. verText .. '{nl}Check checkbox to start DPS logging.{nl}Log files are at game\'s screenshot directory.{nl}Before using ANVIL uncheck chekbox to avoid VGA error.');
+	DpsCount.control.enemy:SetText('');
+	DpsCount.control.loop:SetText('');
+
+	DpsCount.SaveLogDPS();
+	DpsCount.Reset();
+end
+
+function DPSCOUNT_EX_TOGGLE_CAPTURE_FLG(frame, ctrl, argStr, argNum)
+	if ctrl:IsChecked() == 1 then
+		DpsCount.IsCapture = true;
+		session.dps.SendStartDpsMsg();
+	else
+		session.dps.SendStopDpsMsg();
+		DpsCount.IsCapture = false;
 	end
 end
 
-function DpsCount.LoopLastIncrement()
-	local inc = false;
-	if DpsCount.Battle.loop.last ~= DpsCount.Battle.loop.cur then
-		DpsCount.Battle.loop.last = DpsCount.Battle.loop.last + 1;
-		inc = true;
+function DpsCount.GetDicValue(dicID)
+	if type(dicID) ~= 'string' then
+		return 'Unknown';
 	end
-	if DpsCount.Battle.loop.last > DpsCount.Settings.loop.size then
-		DpsCount.Battle.loop.last = 1;
+
+	local name = string.match(dicID, '(@dicID.+\*\^)');
+	if name ~= nil then
+		name = dictionary.ReplaceDicIDInCompStr(name);
 	end
-	return inc;
+
+	if name == nil then
+		name = 'Unknown';
+	end
+
+	return name;
 end
 
-function DpsCount.ParseBattleMsg(msg)
-	if type(msg) ~= 'string' then return end
-	if string.find(msg, '$GiveDamage') == nil then return end
-
-	local tmp, damage = string.match(msg, '($AMOUNT(.+)#@!)');
-	if damage == nil then return end
-
-	damage = string.gsub(damage, '%p', '');
-	damage = tonumber(damage);
-	if damage == nil then return end
-
-	local enemy = string.match(msg, '(@dicID.+\*\^)');
-	if enemy ~= nil then
-		enemy = dictionary.ReplaceDicIDInCompStr(enemy);
+function DpsCount.UnpackDPSInfo(dpsInfo)
+	if dpsInfo == nil then
+		return nil;
 	end
 
+	local damage = tonumber(dpsInfo:GetStrDamage());
+	if damage < 1 then
+		return nil;
+	end
+
+	local time = dpsInfo:GetTime();
+	if time == nil then
+		return nil;
+	end
+
+	local ts = os.time{
+		year = (time.wYear or 0),
+		month = (time.wMonth or 0),
+		day = (time.wDay or 0),
+		hour = (time.wHour or 0),
+		min = (time.wMinute or 0),
+		sec = (time.wSecond or 0),
+		isdst = false
+	};
+	if ts == nil then
+		return nil;
+	end
+
+	-- incorrect arithmetic for large values
+	-- example: print(1556199969-1) --> 1556199936, expected 1556199968
+	-- type number float32 ?..
+	ts = ts - 1555000000; -- however, this is calculated correctly, there is no idea
+
+	local enemy = dpsInfo:GetName();
 	if enemy == nil then
-		enemy = 'Unknown';
+		enemy = 'UnknownEnemy';
+	else
+		enemy = DpsCount.GetDicValue(enemy);
 	end
 
-	return enemy, damage;
+	local skill = dpsInfo:GetSkillID();
+	if skill ~= nil then
+		skill = GetClassByType('Skill', skill);
+		if skill ~= nil then
+			skill = skill.Name;
+		else
+			skill = nil;
+		end
+	end
+	if skill == nil then
+		skill = 'UnknownSkill';
+	else
+		skill = DpsCount.GetDicValue(skill);
+	end
+
+	return {ts = ts, enemy = enemy, skill = skill, damage = damage};
 end
 
-function DpsCount.LoopAggregator(i)
-	if i == nil then
+function DPSCOUNT_EX_UPDATE(frame, msg, argStr, argNum)
+	if (DpsCount.IsCount) or (DpsCount.Battle == nil) then
+		return;
+	end
+
+	local len = session.dps.Get_allDpsInfoSize();
+	if len < 1 then
+		return;
+	end
+
+	DpsCount.IsCount = true;
+	local file = nil;
+	--file = io.open(DpsCount.SaveFilePathName .. '/' .. addonNameLower .. '_debug.txt', 'a');
+
+	--local ts = os.time();
+	--file:write('len = ' .. len ..'; Battle.i = ' .. DpsCount.Battle.i .. '; lost = ' .. DpsCount.Battle.loop.lost .. '; ts = ' .. ts .. '; ts-1 = ' .. (ts-1) .. '\n');
+
+	local status, retval = pcall(DpsCount.Update, len, file);
+	if status == false then
+		file = io.open(DpsCount.SaveFilePathName .. '/' .. addonNameLower .. '_error.txt', 'a');
+		file:write(os.date('%Y-%m-%d %H:%M:%S') .. ' ' .. retval .. '\n');
+		file:close();
+	end
+
+	--file:close();
+	DpsCount.IsCount = false;
+end
+
+function DpsCount.CalcProcCount(proc, count, len, i)
+	if (len < i) or (len - i <= proc) then
+		return proc;
+	end
+
+	if count > len then
+		count = i;
+	end
+
+	local left = math.floor((1000 - count) / (len - count));
+	if left > 10 then
+		return proc;
+	end
+
+	if left < 1 then
+		left = 1;
+	end
+
+	return math.ceil((1000 - i) / left);
+end
+
+function DpsCount.Update(len, file)
+	if len < DpsCount.Battle.i then
+		-- buffer overflow, 1000 - max buffer size
+		DpsCount.Battle.loop.lost = DpsCount.Battle.loop.lost + (1000 - DpsCount.Battle.i);
+		DpsCount.Battle.i = 1;
+	end
+
+	local proc = DpsCount.CalcProcCount(DpsCount.Settings.proc, DpsCount.Battle.loop.last, len, DpsCount.Battle.i);
+	DpsCount.Battle.loop.last = len;
+
+	local max = DpsCount.Battle.i + proc - 1;
+	if len > max then
+		len = max;
+	end
+
+	local ts = 0;
+	local tsMax = 0;
+	for i = DpsCount.Battle.i, len do
+		local dpsInfo = session.dps.Get_alldpsInfoByIndex(i - 1);
+		dpsInfo = DpsCount.UnpackDPSInfo(dpsInfo);
+
+		if dpsInfo ~= nil then
+			--file:write(dpsInfo.ts .. ';' .. os.date('%Y-%m-%d %H:%M:%S', 1555000000 + dpsInfo.ts) .. ';' .. dpsInfo.enemy .. ';' .. dpsInfo.skill .. ';' .. dpsInfo.damage .. ';' .. i .. ';' .. proc .. '\n');
+			ts = DpsCount.Aggregate(dpsInfo);
+			if (ts ~= nil) and (tsMax < ts) then
+				tsMax = ts;
+			end
+		end
+	end
+
+	DpsCount.Battle.loop.count = len;
+	DpsCount.Battle.i = len + 1;
+
+	-- clear the buffer after full processing
+	local lenMax = session.dps.Get_allDpsInfoSize();
+	if len == lenMax then
+		session.dps.Clear_allDpsInfo();
+		DpsCount.Battle.i = 1;
+	end
+
+	if tsMax > 0 then
+		DpsCount.Summarize(tsMax, lenMax);
+	end
+end
+
+function DpsCount.Aggregate(dpsInfo)
+	local damage = dpsInfo.damage;
+	if damage < 50 then
 		return nil;
 	end
 
-	if DpsCount.Battle.loop.list[i] == nil then
-		return nil;
+	local ts = dpsInfo.ts;
+	local enemy = dpsInfo.enemy;
+	local skill = dpsInfo.skill;
+	--print(ts .. ' [' .. enemy .. ', ' .. damage .. ']');
+
+	if DpsCount.Battle.ts.start == 0 then
+		DpsCount.Battle.sec = ts - 1;
+		DpsCount.Battle.ts.time = ts;
+		DpsCount.Battle.ts.last = ts;
+		DpsCount.Battle.ts.start = os.time();
 	end
-
-	local ts = DpsCount.Battle.loop.list[i][1];
-	local msg = DpsCount.Battle.loop.list[i][2];
-
-	DpsCount.Battle.loop.list[i][1] = 0;
-	DpsCount.Battle.loop.list[i][2] = '';
-
-	if (ts == nil) or (ts == 0) or (msg == nil) then
-		return nil;
-	end
-
-	local enemy, damage = DpsCount.ParseBattleMsg(msg);
-	if damage == nil then
-		return nil;
-	end
-	--print(i .. ' => ' .. ts .. ' [' .. enemy .. ', ' .. damage .. ']');
 
 	DpsCount.Battle.tick = DpsCount.Battle.tick + 1;
 	if DpsCount.Battle.ts.last < ts then
@@ -322,15 +556,69 @@ function DpsCount.LoopAggregator(i)
 	DpsCount.Battle.damage.frame[ts].d = DpsCount.Battle.damage.frame[ts].d + damage;
 	DpsCount.Battle.damage.frame[ts].t = DpsCount.Battle.damage.frame[ts].t + 1;
 
+	--
+
 	if DpsCount.Battle.damage.enemy[enemy] == nil then
-		DpsCount.Battle.damage.enemy[enemy] = {total = 0, max = 0, tick = 0};
+		DpsCount.Battle.damage.enemy[enemy] = {total = 0, min = 0, max = 0, tick = 0, skill = {}, last = ''};
 	end
 	DpsCount.Battle.damage.enemy[enemy].total = DpsCount.Battle.damage.enemy[enemy].total + damage;
 	DpsCount.Battle.damage.enemy[enemy].tick = DpsCount.Battle.damage.enemy[enemy].tick + 1;
 
+	if DpsCount.Battle.damage.enemy[enemy].min == 0 then
+		DpsCount.Battle.damage.enemy[enemy].min = damage;
+	else
+		if DpsCount.Battle.damage.enemy[enemy].min > damage then
+			DpsCount.Battle.damage.enemy[enemy].min = damage;
+		end
+	end
+
 	if DpsCount.Battle.damage.enemy[enemy].max < damage then
 		DpsCount.Battle.damage.enemy[enemy].max = damage;
 	end
+
+	--
+
+	DpsCount.Battle.damage.enemy[enemy].last = skill;
+	if DpsCount.Battle.damage.enemy[enemy].skill[skill] == nil then
+		DpsCount.Battle.damage.enemy[enemy].skill[skill] = {total = 0, min = 0, max = 0, tick = 0};
+	end
+
+	DpsCount.Battle.damage.enemy[enemy].skill[skill].total = DpsCount.Battle.damage.enemy[enemy].skill[skill].total + damage;
+	DpsCount.Battle.damage.enemy[enemy].skill[skill].tick = DpsCount.Battle.damage.enemy[enemy].skill[skill].tick + 1;
+
+	if DpsCount.Battle.damage.enemy[enemy].skill[skill].min == 0 then
+		DpsCount.Battle.damage.enemy[enemy].skill[skill].min = damage;
+	else
+		if DpsCount.Battle.damage.enemy[enemy].skill[skill].min > damage then
+			DpsCount.Battle.damage.enemy[enemy].skill[skill].min = damage;
+		end
+	end
+
+	if DpsCount.Battle.damage.enemy[enemy].skill[skill].max < damage then
+		DpsCount.Battle.damage.enemy[enemy].skill[skill].max = damage;
+	end
+
+	--
+
+	if DpsCount.Battle.damage.skill[skill] == nil then
+		DpsCount.Battle.damage.skill[skill] = {total = 0, min = 0, max = 0, tick = 0};
+	end
+	DpsCount.Battle.damage.skill[skill].total = DpsCount.Battle.damage.skill[skill].total + damage;
+	DpsCount.Battle.damage.skill[skill].tick = DpsCount.Battle.damage.skill[skill].tick + 1;
+
+	if DpsCount.Battle.damage.skill[skill].min == 0 then
+		DpsCount.Battle.damage.skill[skill].min = damage;
+	else
+		if DpsCount.Battle.damage.skill[skill].min > damage then
+			DpsCount.Battle.damage.skill[skill].min = damage;
+		end
+	end
+
+	if DpsCount.Battle.damage.skill[skill].max < damage then
+		DpsCount.Battle.damage.skill[skill].max = damage;
+	end
+
+	--
 
 	local inTop = false;
 	for i = 1, 3 do
@@ -349,156 +637,18 @@ function DpsCount.LoopAggregator(i)
 	return ts;
 end
 
-function DPSCOUNT_EX_GET() -- For test suite
-	return DpsCount;
-end
-
-function DPSCOUNT_EX_ON_INIT(addon, frame)
-	DpsCount.frame = frame;
-
-	frame:SetEventScript(ui.LBUTTONUP, 'DPSCOUNT_EX_END_DRAG');
-
-	acutil.setupEvent(addon, 'GAME_START_3SEC', 'DPSCOUNT_EX_ON_GAME_START_3SEC');
-	acutil.setupEvent(addon, 'DRAW_CHAT_MSG', 'DPSCOUNT_EX_CAPTURE_CHAT_UPDATE_TIME');
-	acutil.setupEvent(addon, 'FPS_UPDATE', 'DPSCOUNT_EX_UPDATE_FRAME');
-end
-
-function DPSCOUNT_EX_END_DRAG(addon, frame)
-	DpsCount.Settings.xPos = DpsCount.frame:GetX();
-	DpsCount.Settings.yPos = DpsCount.frame:GetY();
-	acutil.saveJSON(DpsCount.SettingFilePathName, DpsCount.Settings);
-	DpsCount.Log('Settings updated!');
-end
-
-function DPSCOUNT_EX_ON_GAME_START_3SEC()
-	if not DpsCount.Loaded then
-		DpsCount.Loaded = true;
-		DpsCount.LoadSetting();
-	end
-
-	DpsCount.frame:ShowWindow(DpsCount.Settings.show);
-	DpsCount.frame:SetPos(DpsCount.Settings.xPos, DpsCount.Settings.yPos);
-
-	local btn = DpsCount.frame:CreateOrGetControl('button', 'CHATEXTENDS_SOUNDS_BUTTON', 382, 72, 23, 23);
-	btn = tolua.cast(btn, 'ui::CButton');
-	btn:SetFontName('white_16_ol');
-	btn:SetText('R');
-	btn:SetEventScript(ui.LBUTTONDOWN, 'DPSCOUNT_EX_BATTLE_RESET_BUTTON');
-
-	DpsCount.control.total = DpsCount.frame:CreateOrGetControl('richtext', 'DPSCOUNT_EX_ON_TOTAL', 5, 5, 280, 20);
-	tolua.cast(DpsCount.control.total, 'ui::CRichText');
-	DpsCount.control.total:SetGravity(ui.LEFT, ui.TOP);
-
-	DpsCount.control.enemy = DpsCount.frame:CreateOrGetControl('richtext', 'DPSCOUNT_EX_ON_ENEMY_NAME', 5, 41, 280, 20);
-	tolua.cast(DpsCount.control.enemy, 'ui::CRichText');
-	DpsCount.control.enemy:SetGravity(ui.LEFT, ui.TOP);
-
-	DpsCount.control.loop = DpsCount.frame:CreateOrGetControl('richtext', 'DPSCOUNT_EX_ON_LOOP_INFO', 329, 74, 60, 23);
-	tolua.cast(DpsCount.control.loop, 'ui::CRichText');
-	DpsCount.control.loop:SetGravity(ui.LEFT, ui.TOP);
-
-	DPSCOUNT_EX_BATTLE_RESET_BUTTON();
-end
-
-function DPSCOUNT_EX_BATTLE_RESET_BUTTON()
-	DpsCount.control.total:SetText('{#FFFFFF}{ol}{s16}DPS Count Ex v' .. verText);
-	DpsCount.control.enemy:SetText('');
-	DpsCount.control.loop:SetText('');
-
-	DpsCount.SaveLogDPS();
-	DpsCount.Reset();
-end
-
-function DPSCOUNT_EX_CAPTURE_CHAT_UPDATE_TIME(frame, msg)
-	local groupboxname, startindex, chatframe = acutil.getEventArgs(msg);
-
-	if startindex <= 0 then
-		return;
-	end
-
-	if chatframe ~= ui.GetFrame('chatframe') then
-		return;
-	end
-
-	if groupboxname ~= 'chatgbox_TOTAL' then
-		return;
-	end
-
-	local groupbox = GET_CHILD(chatframe, groupboxname);
-	if groupbox == nil then
-		return;
-	end
-
-	local clusterinfo = session.ui.GetChatMsgInfo(groupboxname, startindex)
-	if clusterinfo == nil then
-		return;
-	end
-
-	local msgType = clusterinfo:GetMsgType();
-	if msgType ~= 'Battle' then
-		return;
-	end
-
-	local clock = math.ceil(os.clock());
+function DpsCount.Summarize(tsMax, lenMax)
 	if DpsCount.Battle.ts.start == 0 then
-		DpsCount.Battle.ts.start = os.time();
-		DpsCount.Battle.ts.clock = clock;
-		DpsCount.Battle.ts.last = clock;
-	end
-
-	DpsCount.LoopCurIncrement();
-	DpsCount.Battle.loop.list[DpsCount.Battle.loop.cur][1] = clock;
-	DpsCount.Battle.loop.list[DpsCount.Battle.loop.cur][2] = clusterinfo:GetMsg();
-end
-
-function DPSCOUNT_EX_UPDATE_FRAME(frame, msg, argStr, argNum)
-	if DpsCount.Battle == nil then
-		return;
-	end
-
-	if DpsCount.IsCount then
-		return;
-	else
-		DpsCount.IsCount = true;
-	end
-
-	local ts = 0;
-	local tsMax = 0;
-	local loopCnt = 0;
-
-	while DpsCount.LoopLastIncrement() do
-		ts = DpsCount.LoopAggregator(DpsCount.Battle.loop.last);
-		if ts ~= nil then
-			if DpsCount.Battle.time == 0 then
-				DpsCount.Battle.time = ts;
-			end
-			if tsMax < ts then
-				tsMax = ts;
-			end
-			loopCnt = loopCnt + 1;
-			if loopCnt >= DpsCount.Settings.loop.proc then
-				loopCnt = DpsCount.Settings.loop.proc;
-				break;
-			end
-		end
-	end
-
-	DpsCount.Battle.loop.count = loopCnt;
-	if loopCnt < 1 then
-		DpsCount.IsCount = false;
-		return;
-	end
-
-	if (tsMax == nil) or (tsMax < 1) then
-		DpsCount.IsCount = false;
 		return;
 	end
 
 	local sec = DpsCount.Battle.sec + 1;
-	for i = sec, tsMax do
-		if (DpsCount.Battle.damage.frame[i] ~= nil) and (DpsCount.Battle.damage.frame[i].d ~= nil) and (DpsCount.Battle.damage.frame[i].d > 100) then
-			DpsCount.Battle.sec = i;
-			DpsCount.Battle.damage.eSec = DpsCount.Battle.damage.eSec + 1;
+	if tsMax >= sec then
+		for i = sec, tsMax do
+			if (DpsCount.Battle.damage.frame[i] ~= nil) and (DpsCount.Battle.damage.frame[i].d ~= nil) then
+				DpsCount.Battle.sec = i;
+				DpsCount.Battle.damage.eSec = DpsCount.Battle.damage.eSec + 1;
+			end
 		end
 	end
 
@@ -534,7 +684,7 @@ function DPSCOUNT_EX_UPDATE_FRAME(frame, msg, argStr, argNum)
 		DpsCount.Battle.damage.eDPS = 0;
 	end
 
-	DpsCount.Battle.damage.aSec = tsMax - DpsCount.Battle.time;
+	DpsCount.Battle.damage.aSec = tsMax - DpsCount.Battle.ts.time;
 	if DpsCount.Battle.damage.aSec >= 0 then
 		if DpsCount.Battle.damage.aSec > 0 then
 			DpsCount.Battle.damage.aSec = DpsCount.Battle.damage.aSec + 1;
@@ -564,7 +714,5 @@ function DPSCOUNT_EX_UPDATE_FRAME(frame, msg, argStr, argNum)
 
 	DpsCount.control.total:SetText(DpsCount.GetString(false));
 	DpsCount.control.enemy:SetText(string.format('{#AAAAAA}{ol}{s16}%s', enemyList));
-	DpsCount.control.loop:SetText(string.format('{#AAAAAA}{ol}{s16}%s/%s', DpsCount.Battle.loop.count, DpsCount.Battle.loop.lost));
-
-	DpsCount.IsCount = false;
+	DpsCount.control.loop:SetText(string.format('{#AAAAAA}{ol}{s16}%s/%s', DpsCount.Battle.loop.count, lenMax));
 end
